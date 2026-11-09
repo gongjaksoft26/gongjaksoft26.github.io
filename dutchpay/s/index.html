@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>더치페이 정산 결과</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --border: #e6e8ec; --text: #14161c; --muted: #6b7280;
+    --primary: #3d5afe; --send: #e5484d; --receive: #1a9b6c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #1a1d24; --border: #2a2e38; --text: #f2f4f8; --muted: #9aa3b2;
+            --primary: #7b8cff; --send: #ff7a80; --receive: #4cd29b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif; }
+  main { max-width: 480px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 22px; margin: 8px 0 4px; }
+  .sub { color: var(--muted); font-size: 14px; margin: 0 0 20px; }
+  h2 { font-size: 15px; margin: 24px 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 4px 16px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+         padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: 0; }
+  .amount { font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .send { color: var(--send); } .receive { color: var(--receive); }
+  .small { color: var(--muted); font-size: 13px; }
+  .cta { display: block; text-align: center; background: var(--primary); color: #fff; text-decoration: none;
+         font-weight: 700; border-radius: 14px; padding: 16px; margin-top: 28px; }
+  .cta.secondary { background: transparent; color: var(--primary); border: 1px solid var(--primary); margin-top: 10px; }
+  .error { text-align: center; padding: 48px 0; color: var(--muted); }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div id="result" hidden>
+    <h1 id="headline"></h1>
+    <p class="sub" id="summary"></p>
+    <h2>보낼 돈</h2>
+    <div class="card" id="transfers"></div>
+    <h2>인별 정산</h2>
+    <div class="card" id="balances"></div>
+  </div>
+  <div id="error" class="error" hidden>
+    <p>정산 내용을 불러오지 못했어요.<br>링크가 잘렸을 수 있어요. 보낸 사람에게 다시 요청해 주세요.</p>
+  </div>
+  <a id="install" class="cta" href="#">앱 설치하고 정산 이어서 하기</a>
+  <a id="open" class="cta secondary" href="#">앱이 있다면 앱에서 열기</a>
+  <p class="small" style="text-align:center;margin-top:20px">
+    이 페이지는 링크 안의 내용을 기기에서만 읽습니다. 정산 내용은 어떤 서버에도 전송되거나 저장되지 않습니다.
+  </p>
+</main>
+<script>
+// 외부에서 들어온 값이므로 화면에는 항상 textContent로만 넣는다(innerHTML 금지).
+const PACKAGE = 'com.gongjaksoft.dutchpaycalculator';
+const won = (n) => n.toLocaleString('ko-KR') + '원';
+const $ = (id) => document.getElementById(id);
+
+// 앱의 SharedSettlement.tryParse와 같은 한도. 한쪽을 고치면 양쪽을 함께 고친다.
+const LIMITS = { code: 3000, names: 30, name: 12, title: 60, transfers: 60, amount: 1e10 };
+
+async function decode(code) {
+  if (!code || code.length > LIMITS.code) throw new Error('code');
+  const b64 = code.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4));
+  const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  const text = await new Response(stream).text();
+  const j = JSON.parse(text);
+
+  const amount = (v) => {
+    if (!Number.isInteger(v) || v < 0 || v > LIMITS.amount) throw new Error('amount');
+    return v;
+  };
+  if (j.v !== 1 || typeof j.t !== 'string' || j.t.length > LIMITS.title) throw new Error('v');
+  if (!Array.isArray(j.n) || j.n.length < 1 || j.n.length > LIMITS.names) throw new Error('n');
+  if (j.n.some((n) => typeof n !== 'string' || !n.trim() || n.length > LIMITS.name)) throw new Error('n');
+  if (!Array.isArray(j.b) || j.b.length !== j.n.length) throw new Error('b');
+  if (!Array.isArray(j.x) || j.x.length > LIMITS.transfers) throw new Error('x');
+  const balances = j.n.map((name, i) => ({
+    name, paid: amount(j.b[i][0]), shouldPay: amount(j.b[i][1]),
+  }));
+  const transfers = j.x.map(([f, t, a]) => {
+    if (!Number.isInteger(f) || !Number.isInteger(t) || f === t || !j.n[f] || !j.n[t]) throw new Error('x');
+    if (amount(a) === 0) throw new Error('x');
+    return { from: j.n[f], to: j.n[t], amount: a };
+  });
+  return { title: j.t, total: amount(j.s), balances, transfers };
+}
+
+function row(left, right, cls) {
+  const el = document.createElement('div');
+  el.className = 'row';
+  const l = document.createElement('div');
+  const r = document.createElement('div');
+  r.className = 'amount' + (cls ? ' ' + cls : '');
+  if (typeof left === 'string') l.textContent = left;
+  else left.forEach((node) => l.appendChild(node));
+  r.textContent = right;
+  el.append(l, r);
+  return el;
+}
+
+function line(text, small) {
+  const d = document.createElement('div');
+  if (small) d.className = 'small';
+  d.textContent = text;
+  return d;
+}
+
+function render(s) {
+  $('headline').textContent = s.transfers.length === 0 ? '정산이 끝났어요' : s.transfers.length + '번만 보내면 끝나요';
+  $('summary').textContent = (s.title ? s.title + ' · ' : '') + '총 ' + won(s.total) + ' · ' + s.balances.length + '명';
+  const t = $('transfers');
+  if (s.transfers.length === 0) t.appendChild(row('주고받을 돈이 없어요', '-'));
+  s.transfers.forEach((x) => t.appendChild(row(x.from + ' → ' + x.to, won(x.amount), 'send')));
+  const b = $('balances');
+  s.balances.forEach((x) => {
+    const diff = x.paid - x.shouldPay;
+    const label = diff > 0 ? '받을 돈 ' : diff < 0 ? '보낼 돈 ' : '정산 완료';
+    b.appendChild(row(
+      [line(x.name), line('낸 돈 ' + won(x.paid) + ' · 낼 돈 ' + won(x.shouldPay), true)],
+      diff === 0 ? label : label + won(Math.abs(diff)),
+      diff > 0 ? 'receive' : diff < 0 ? 'send' : '',
+    ));
+  });
+  $('result').hidden = false;
+}
+
+const code = location.hash.slice(1);
+const play = 'https://play.google.com/store/apps/details?id=' + PACKAGE +
+  (code ? '&referrer=' + encodeURIComponent('dp=' + code) : '');
+$('install').href = play;
+// 앱 링크가 검증되지 않은 환경(일부 인앱 브라우저)을 위한 수동 열기.
+$('open').href = 'intent://' + location.host + location.pathname + location.hash +
+  '#Intent;scheme=https;package=' + PACKAGE + ';S.browser_fallback_url=' + encodeURIComponent(play) + ';end';
+
+decode(code).then(render).catch(() => { $('error').hidden = false; });
+</script>
+</body>
+</html>
